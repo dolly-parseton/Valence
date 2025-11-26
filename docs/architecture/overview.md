@@ -1,6 +1,6 @@
 # Architecture Overview
 
-**Status**: Draft - Pending ADR-001 decision
+**Status**: Confirmed
 
 ## High-Level Architecture
 
@@ -46,7 +46,7 @@
 ## Component Responsibilities
 
 ### Canvas Layer
-*Implementation TBD pending ADR-001*
+*Implementation TBD pending ADR-001* - SvelteFlow + tauri
 
 Responsible for:
 - Rendering documents as widgets on a 2D canvas

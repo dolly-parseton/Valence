@@ -1,156 +1,496 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import {
+    SvelteFlow,
+    Controls,
+    Background,
+    MiniMap,
+    type Node,
+    type Edge,
+    type Connection,
+  } from '@xyflow/svelte';
+  import '@xyflow/svelte/dist/style.css';
 
-  let name = $state("");
-  let greetMsg = $state("");
+  import NoteNode from '$lib/nodes/NoteNode.svelte';
+  import MarkdownNode from '$lib/nodes/MarkdownNode.svelte';
+  import JsonNode from '$lib/nodes/JsonNode.svelte';
+  import AwarenessOverlay from '$lib/components/AwarenessOverlay.svelte';
+  import * as history from '$lib/stores/history';
+  import {
+    createMoveNodeCommand,
+    createAddEdgeCommand,
+    createDeleteNodeCommand,
+    createAddNodeCommand,
+  } from '$lib/stores/commands';
+  import { setCanvasContext } from '$lib/stores/canvas-context';
+  import { findOverlappingPairs } from '$lib/utils/awareness';
 
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  // Register custom node types
+  const nodeTypes = {
+    note: NoteNode,
+    markdown: MarkdownNode,
+    json: JsonNode,
+  };
+
+  // Initial nodes - Phishing Investigation Demo
+  let nodes = $state<Node[]>([
+    // Row 1 - Initial Alert & Triage
+    {
+      id: '1',
+      type: 'json',
+      position: { x: 50, y: 50 },
+      data: {
+        title: 'Phishing Alert',
+        content: JSON.stringify({
+          alert_id: 'PHI-2024-0847',
+          severity: 'high',
+          timestamp: '2024-11-26T09:23:41Z',
+          source: 'Email Gateway',
+          subject: 'Urgent: Password Reset Required',
+          recipient: 'john.smith@acme.corp',
+          sender: 'IT-Support@acme-corp.net'
+        }, null, 2)
+      },
+    },
+    {
+      id: '2',
+      type: 'note',
+      position: { x: 350, y: 50 },
+      data: {
+        title: 'Triage Notes',
+        text: 'Initial triage by L1 analyst.\n\nSuspicious sender domain: acme-corp.net vs legitimate acme.corp\n\nEscalated to L2 for deeper analysis.'
+      },
+    },
+    {
+      id: '3',
+      type: 'markdown',
+      position: { x: 620, y: 50 },
+      data: {
+        title: 'IOC Summary',
+        content: '## Indicators of Compromise\n\n| Type | Value | Status |\n|------|-------|--------|\n| Domain | `acme-corp.net` | Malicious |\n| IP | `185.234.72.19` | Suspicious |\n| Hash | `a1b2c3...` | Unknown |\n\n**Action:** Block domain at proxy'
+      },
+    },
+
+    // Row 2 - Investigation Details
+    {
+      id: '4',
+      type: 'json',
+      position: { x: 50, y: 320 },
+      data: {
+        title: 'Email Headers',
+        content: JSON.stringify({
+          'Return-Path': '<bounce@acme-corp.net>',
+          'X-Originating-IP': '185.234.72.19',
+          'Received-SPF': 'fail',
+          'DKIM-Signature': 'none',
+          'X-Spam-Score': 8.5
+        }, null, 2)
+      },
+    },
+    {
+      id: '5',
+      type: 'note',
+      position: { x: 350, y: 320 },
+      data: {
+        title: 'Victim Interview',
+        text: 'Spoke with John Smith:\n\n- Did NOT click any links\n- Reported email immediately\n- No credentials entered\n- Forwarded to security team\n\nNo compromise detected on endpoint.'
+      },
+    },
+    {
+      id: '6',
+      type: 'markdown',
+      position: { x: 620, y: 320 },
+      data: {
+        title: 'Domain Analysis',
+        content: '## acme-corp.net\n\n**Registration:** 2 days ago\n**Registrar:** NameCheap\n**Hosting:** Bulletproof hosting (RU)\n\n### DNS Records\n```\nA     185.234.72.19\nMX    mail.acme-corp.net\n```\n\n> Classic typosquat pattern'
+      },
+    },
+
+    // Row 3 - Resolution
+    {
+      id: '7',
+      type: 'json',
+      position: { x: 50, y: 590 },
+      data: {
+        title: 'Remediation Actions',
+        content: JSON.stringify({
+          actions: [
+            { type: 'block_domain', target: 'acme-corp.net', status: 'complete' },
+            { type: 'block_ip', target: '185.234.72.19', status: 'complete' },
+            { type: 'email_purge', count: 12, status: 'complete' },
+            { type: 'user_notification', recipients: 'all_staff', status: 'pending' }
+          ],
+          blocked_at: '2024-11-26T10:45:00Z'
+        }, null, 2)
+      },
+    },
+    {
+      id: '8',
+      type: 'note',
+      position: { x: 350, y: 590 },
+      data: {
+        title: 'Lessons Learned',
+        text: 'Campaign targeted finance dept.\n\n12 users received email, 0 clicked.\n\nSecurity awareness training effective!\n\nRecommend: Add lookalike domain monitoring.'
+      },
+    },
+    {
+      id: '9',
+      type: 'markdown',
+      position: { x: 620, y: 590 },
+      data: {
+        title: 'Case Summary',
+        content: '## PHI-2024-0847 - CLOSED\n\n**Classification:** Phishing attempt\n**Impact:** None (blocked)\n**Time to Detect:** 4 minutes\n**Time to Contain:** 82 minutes\n\n### Verdict\n✅ Successfully mitigated\n✅ No data exfiltration\n✅ No credential compromise'
+      },
+    },
+  ]);
+
+  // No edges for demo
+  let edges = $state<Edge[]>([]);
+
+  // Track undo/redo availability for UI
+  let canUndo = $state(false);
+  let canRedo = $state(false);
+
+  $effect(() => {
+    return history.subscribe((undo, redo) => {
+      canUndo = undo;
+      canRedo = redo;
+    });
+  });
+
+  // Awareness debugging
+  let showAwareness = $state(false);
+  const AWARENESS_DISTANCE = 50; // pixels
+
+  // Track overlapping node pairs
+  let overlappingPairs = $state<Set<string>>(new Set());
+
+  // Recalculate overlaps when nodes change position
+  $effect(() => {
+    if (showAwareness) {
+      overlappingPairs = findOverlappingPairs(nodes, AWARENESS_DISTANCE);
+    }
+  });
+
+  function toggleAwareness() {
+    showAwareness = !showAwareness;
+  }
+
+  // Track node positions before drag for undo
+  let dragStartPositions: Map<string, { x: number; y: number }> = new Map();
+
+  function handleDragStart(event: { nodes: Node[] }) {
+    // Store starting positions of all dragged nodes
+    dragStartPositions.clear();
+    const draggedNodes = event.nodes ?? [];
+    draggedNodes.forEach((node: Node) => {
+      dragStartPositions.set(node.id, { ...node.position });
+    });
+  }
+
+  function handleDragStop(event: { nodes: Node[] }) {
+    const draggedNodes = event.nodes ?? [];
+
+    draggedNodes.forEach((node: Node) => {
+      const oldPos = dragStartPositions.get(node.id);
+      const newPos = { ...node.position };
+      if (oldPos && (oldPos.x !== newPos.x || oldPos.y !== newPos.y)) {
+        // Record the move (already happened via SvelteFlow's drag)
+        // Using record() instead of execute() since the action already occurred
+        history.record(
+          createMoveNodeCommand(node.id, oldPos, newPos, updateNodes)
+        );
+      }
+    });
+
+    dragStartPositions.clear();
+  }
+
+  function handleConnect(connection: Connection) {
+    const newEdge: Edge = {
+      id: `e${connection.source}-${connection.target}`,
+      source: connection.source!,
+      target: connection.target!,
+    };
+
+    history.execute(createAddEdgeCommand(newEdge, updateEdges));
+  }
+
+  // Update functions for use with commands
+  function updateNodes(fn: (nodes: Node[]) => Node[]) {
+    nodes = fn(nodes);
+  }
+
+  function updateEdges(fn: (edges: Edge[]) => Edge[]) {
+    edges = fn(edges);
+  }
+
+  // Canvas context for child components
+  function getNode(nodeId: string): Node | undefined {
+    return nodes.find((n) => n.id === nodeId);
+  }
+
+  function getConnectedEdges(nodeId: string): Edge[] {
+    return edges.filter((e) => e.source === nodeId || e.target === nodeId);
+  }
+
+  function deleteNode(nodeId: string) {
+    const node = getNode(nodeId);
+    if (!node) return;
+
+    const connectedEdges = getConnectedEdges(nodeId);
+    history.execute(
+      createDeleteNodeCommand(node, connectedEdges, updateNodes, updateEdges)
+    );
+  }
+
+  function deleteEdge(edgeId: string) {
+    const edge = edges.find((e) => e.id === edgeId);
+    if (!edge) return;
+
+    history.execute({
+      description: 'Delete connection',
+      execute: () => updateEdges((edges) => edges.filter((e) => e.id !== edgeId)),
+      undo: () => updateEdges((edges) => [...edges, edge]),
+    });
+  }
+
+  function duplicateNode(nodeId: string) {
+    const node = getNode(nodeId);
+    if (!node) return;
+
+    const newNode: Node = {
+      ...structuredClone(node),
+      id: String(nodeIdCounter++),
+      position: {
+        x: node.position.x + 50,
+        y: node.position.y + 50,
+      },
+    };
+
+    history.execute(createAddNodeCommand(newNode, updateNodes));
+  }
+
+  function recordDataChange(
+    nodeId: string,
+    oldData: Record<string, unknown>,
+    newData: Record<string, unknown>,
+    description: string = 'Edit node'
+  ) {
+    history.record({
+      description,
+      execute: () => {
+        updateNodes((nodes) =>
+          nodes.map((n) =>
+            n.id === nodeId ? { ...n, data: newData } : n
+          )
+        );
+      },
+      undo: () => {
+        updateNodes((nodes) =>
+          nodes.map((n) =>
+            n.id === nodeId ? { ...n, data: oldData } : n
+          )
+        );
+      },
+    });
+  }
+
+  // Track if any node is being edited (locks workspace undo/redo)
+  let isEditing = $state(false);
+
+  function setEditing(editing: boolean) {
+    isEditing = editing;
+  }
+
+  // Set up canvas context for child components
+  setCanvasContext({
+    deleteNode,
+    deleteEdge,
+    duplicateNode,
+    getNode,
+    getConnectedEdges,
+    recordDataChange,
+    setEditing,
+  });
+
+  // Keyboard shortcuts
+  function handleKeydown(event: KeyboardEvent) {
+    // Skip workspace undo/redo while editing a node
+    if (isEditing) return;
+
+    const key = event.key.toLowerCase();
+
+    // Cmd/Ctrl+Shift+Z for redo
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey && key === 'z') {
+      event.preventDefault();
+      history.redo();
+      return;
+    }
+
+    // Cmd/Ctrl+Z for undo
+    if ((event.metaKey || event.ctrlKey) && key === 'z') {
+      event.preventDefault();
+      history.undo();
+      return;
+    }
+
+    // Cmd/Ctrl+Y for redo (alternative)
+    if ((event.metaKey || event.ctrlKey) && key === 'y') {
+      event.preventDefault();
+      history.redo();
+      return;
+    }
+  }
+
+  // Add node function for toolbar
+  let nodeIdCounter = 10;
+  function addNode(type: string) {
+    const newNode: Node = {
+      id: String(nodeIdCounter++),
+      type,
+      position: { x: 200 + Math.random() * 100, y: 200 + Math.random() * 100 },
+      data: type === 'note' ? { text: '' } : type === 'markdown' ? { content: '' } : type === 'json' ? { content: '' } : { label: 'New Node' },
+    };
+
+    history.execute(createAddNodeCommand(newNode, updateNodes));
   }
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+<svelte:window onkeydown={handleKeydown} />
 
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
+<div class="app-container">
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <button onclick={() => addNode('note')} title="Add Note">
+        + Note
+      </button>
+      <button onclick={() => addNode('markdown')} title="Add Markdown">
+        + Markdown
+      </button>
+      <button onclick={() => addNode('json')} title="Add JSON">
+        + JSON
+      </button>
+    </div>
+    <div class="toolbar-divider"></div>
+    <div class="toolbar-group">
+      <button
+        onclick={() => history.undo()}
+        disabled={!canUndo}
+        title={canUndo ? `Undo: ${history.getUndoDescription()}` : 'Nothing to undo'}
+      >
+        Undo
+      </button>
+      <button
+        onclick={() => history.redo()}
+        disabled={!canRedo}
+        title={canRedo ? `Redo: ${history.getRedoDescription()}` : 'Nothing to redo'}
+      >
+        Redo
+      </button>
+    </div>
+    <div class="toolbar-divider"></div>
+    <div class="toolbar-group">
+      <button
+        onclick={toggleAwareness}
+        class:active={showAwareness}
+        title="Toggle awareness zone visualization"
+      >
+        {showAwareness ? '🔵 Awareness' : '⚪ Awareness'}
+      </button>
+      {#if showAwareness && overlappingPairs.size > 0}
+        <span class="overlap-count">{overlappingPairs.size} overlap{overlappingPairs.size !== 1 ? 's' : ''}</span>
+      {/if}
+    </div>
   </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
-</main>
+  <div class="canvas-container">
+    <SvelteFlow
+      bind:nodes
+      bind:edges
+      {nodeTypes}
+      fitView
+      onnodedragstart={handleDragStart}
+      onnodedragstop={handleDragStop}
+      onconnect={handleConnect}
+    >
+      <Controls />
+      <Background />
+      <MiniMap />
+      {#if showAwareness}
+        <AwarenessOverlay
+          {nodes}
+          awarenessDistance={AWARENESS_DISTANCE}
+          {overlappingPairs}
+        />
+      {/if}
+    </SvelteFlow>
+  </div>
+</div>
 
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+  .app-container {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
 
-  a:hover {
-    color: #24c8db;
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #1f2937;
+    border-bottom: 1px solid #374151;
   }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+  .toolbar-group {
+    display: flex;
+    gap: 4px;
   }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
 
+  .toolbar-divider {
+    width: 1px;
+    height: 24px;
+    background: #4b5563;
+    margin: 0 4px;
+  }
+
+  .toolbar button {
+    padding: 6px 12px;
+    background: #374151;
+    border: 1px solid #4b5563;
+    border-radius: 4px;
+    color: #e5e7eb;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .toolbar button:hover:not(:disabled) {
+    background: #4b5563;
+  }
+
+  .toolbar button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .canvas-container {
+    flex: 1;
+    width: 100%;
+  }
+
+  .toolbar button.active {
+    background: #3b82f6;
+    border-color: #2563eb;
+  }
+
+  .overlap-count {
+    color: #fbbf24;
+    font-size: 12px;
+    padding: 4px 8px;
+    background: rgba(251, 191, 36, 0.15);
+    border-radius: 4px;
+  }
 </style>

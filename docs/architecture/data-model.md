@@ -202,6 +202,8 @@ Accepting a proposal converts it to a real document/link.
 
 *Decision pending - options:*
 
+> Almost surely going with SQLite, but I can see the appeal of JSON and a folder structure because the coding assistant style workflows would be really interesting. Thinking about how KQL-Panopticon might send it's output to this kind of structure. JSON files would be easier but there's definitely pros to SQLite as well...
+
 ### Option A: JSON Files
 ```
 investigation-abc123/
